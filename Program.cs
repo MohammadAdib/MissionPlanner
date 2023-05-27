@@ -231,9 +231,6 @@ namespace MissionPlanner
                 IconFile = MissionPlanner.Properties.Resources.mpdesktop.ToBitmap();
             }
 
-            if (File.Exists(Settings.GetRunningDirectory() + "splashbg.png")) // 600*375
-                SplashBG = new Bitmap(Settings.GetRunningDirectory() + "splashbg.png");
-
             try
             {
                 var file = MissionPlanner.Utilities.NativeLibrary.GetLibraryPathname("libSkiaSharp");
@@ -261,15 +258,6 @@ namespace MissionPlanner
             }
 
             Splash = new MissionPlanner.Splash();
-            if (SplashBG != null)
-            {
-                Splash.BackgroundImage = SplashBG;
-                Splash.pictureBox1.Visible = false;
-            }
-
-            Console.WriteLine("IconFile");
-            if (IconFile != null)
-                Splash.Icon = Icon.FromHandle(((Bitmap) IconFile).GetHicon());
 
             string strVersion = File.Exists("version.txt")
                 ? File.ReadAllText("version.txt")
