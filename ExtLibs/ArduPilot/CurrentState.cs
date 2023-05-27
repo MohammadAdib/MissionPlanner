@@ -1266,8 +1266,8 @@ namespace MissionPlanner
         public double watts => battery_voltage * current;
 
         [GroupText("Battery")]
-        [DisplayText("Bat efficiency (mah/km)")]
-        public double battery_mahperkm => battery_usedmah / (distTraveled / 1000.0f);
+        [DisplayText("Efficiency (mah/km)")]
+        public double battery_mahperkm => (current * 1000f) / (groundspeed * 3.6f);
 
         [GroupText("Battery")]
         [DisplayText("Bat km left EST (km)")]
@@ -1275,7 +1275,7 @@ namespace MissionPlanner
                                         battery_mahperkm;
 
         [GroupText("Battery")]
-        [DisplayText("Bat used EST (mah)")]
+        [DisplayText("Consumed (mah)")]
         public double battery_usedmah { get; set; }
 
         [GroupText("Battery")] public double battery_cell1 { get; set; }
@@ -1665,25 +1665,30 @@ namespace MissionPlanner
 
         // Sik radio
         [GroupText("Telem")]
-        [DisplayText("Sik Radio rssi")]
+        [DisplayText("TRSS")]
         public float rssi { get; set; }
 
         [GroupText("Telem")]
-        [DisplayText("Sik Radio remote rssi")]
+        [DisplayText("1RSS")]
         public float remrssi { get; set; }
 
-        [GroupText("Telem")] public byte txbuffer { get; set; }
+        [GroupText("Telem")]
+        [DisplayText("TLQ")]
+        public byte txbuffer { get; set; }
 
         [GroupText("Telem")]
-        [DisplayText("Sik Radio noise")]
+        [DisplayText("TSNR")]
         public float noise { get; set; }
 
         [GroupText("Telem")]
-        [DisplayText("Sik Radio remote noise")]
+        [DisplayText("RSNR")]
         public float remnoise { get; set; }
 
         [GroupText("Telem")] public ushort rxerrors { get; set; }
-        [GroupText("Telem")] public ushort fixedp { get; set; }
+
+        [GroupText("Telem")]
+        [DisplayText("RLQ")]
+        public ushort fixedp { get; set; }
 
         [GroupText("Telem")]
         [DisplayText("Sik Radio snr")]
