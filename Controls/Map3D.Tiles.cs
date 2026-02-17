@@ -45,13 +45,25 @@ namespace MissionPlanner.Controls
         private readonly ConcurrentDictionary<(long x, long y, int z), byte> _inFlight = new ConcurrentDictionary<(long, long, int), byte>();
         private List<Thread> _tileWorkers = new List<Thread>();
         private const int TileWorkerCount = 2;
+        private PointLatLngAlt _lastTileGenPos = PointLatLngAlt.Zero;
+        private const double TileRegenDistanceM = 1000; // only regenerate tiles after 1km movement
 
         #endregion
 
         #region Tile Constants
 
         private const double LOD_NEAR_DISTANCE = 500;   // meters - use max zoom within this distance
-        private const double LOD_FAR_DISTANCE = 8000;   // meters - use min zoom beyond this distance
+
+        /// <summary>
+        /// Maximum tile loading distance: 50km under 1000m alt, 100km above.
+        /// </summary>
+        private double LodFarDistance
+        {
+            get
+            {
+                return _center.Alt >= 1000 ? 100000.0 : 50000.0;
+            }
+        }
 
         #endregion
 
@@ -208,6 +220,9 @@ namespace MissionPlanner.Controls
                     core.OnMapSizeChanged(1000, 1000);
                 }
 
+                bool needRefresh = _forceRefreshTiles || _lastTileGenPos == PointLatLngAlt.Zero ||
+                    _center.GetDistance(_lastTileGenPos) > TileRegenDistanceM;
+
                 if (_forceRefreshTiles || _center.GetDistance(core.Position) > 30)
                 {
                     _forceRefreshTiles = false;
@@ -218,7 +233,12 @@ namespace MissionPlanner.Controls
                     lock(_tileAreaLock)
                         CleanupOldTextures(tileArea);
 
-                generateTextures();
+                // Only regenerate tile area after 1km of movement or on force refresh
+                if (needRefresh)
+                {
+                    _lastTileGenPos = new PointLatLngAlt(_center);
+                    generateTextures();
+                }
 
                 System.Threading.Thread.Sleep(100);
             }
@@ -242,12 +262,9 @@ namespace MissionPlanner.Controls
 
                 var allTasks = new List<(LoadTask task, int zoomLevel, double dist)>();
 
-                int altitudeZoomAdjust = (_center.Alt >= 500) ? 1 : 0;
-                int effectiveMaxZoom = Math.Max(minzoom, zoom - altitudeZoomAdjust);
-
-                for (int z = effectiveMaxZoom; z >= minzoom; z--)
+                for (int z = effectiveZoom; z >= minzoom; z--)
                 {
-                    double innerDist = (z == effectiveMaxZoom) ? 0 : GetDistanceForZoom(z + 1);
+                    double innerDist = (z == effectiveZoom) ? 0 : GetDistanceForZoom(z + 1);
                     double outerDist = GetDistanceForZoom(z);
 
                     var area = new RectLatLng(cameraPos.Lat, cameraPos.Lng, 0, 0);
@@ -322,7 +339,7 @@ namespace MissionPlanner.Controls
             {
                 try
                 {
-                    cachedTile = Map3DTileCache.LoadTileOrBetter(p.X, p.Y, zoomLevel, zoom);
+                    cachedTile = Map3DTileCache.LoadTileOrBetter(p.X, p.Y, zoomLevel, effectiveZoom);
                 }
                 catch (Exception ex)
                 {
@@ -660,27 +677,35 @@ namespace MissionPlanner.Controls
 
         private int GetOptimalZoomForDistance(double distanceMeters)
         {
+            double farDist = LodFarDistance;
+            int maxZ = effectiveZoom;
+            int minZ = minzoom;
             if (distanceMeters <= LOD_NEAR_DISTANCE)
-                return zoom;
-            if (distanceMeters >= LOD_FAR_DISTANCE)
-                return minzoom;
+                return maxZ;
+            if (distanceMeters >= farDist)
+                return minZ;
 
-            double t = Math.Log(distanceMeters / LOD_NEAR_DISTANCE) / Math.Log(LOD_FAR_DISTANCE / LOD_NEAR_DISTANCE);
+            double t = Math.Log(distanceMeters / LOD_NEAR_DISTANCE) / Math.Log(farDist / LOD_NEAR_DISTANCE);
             t = Math.Max(0, Math.Min(1, t));
 
-            int optimalZoom = (int)Math.Round(zoom - t * (zoom - minzoom));
-            return Math.Max(minzoom, Math.Min(zoom, optimalZoom));
+            int optimalZoom = (int)Math.Round(maxZ - t * (maxZ - minZ));
+            return Math.Max(minZ, Math.Min(maxZ, optimalZoom));
         }
 
         private double GetDistanceForZoom(int zoomLevel)
         {
-            if (zoomLevel >= zoom)
+            double farDist = LodFarDistance;
+            int maxZ = effectiveZoom;
+            int minZ = minzoom;
+            if (zoomLevel <= minZ)
+                return farDist;
+            if (zoomLevel >= maxZ)
                 return LOD_NEAR_DISTANCE;
-            if (zoomLevel <= minzoom)
-                return LOD_FAR_DISTANCE;
 
-            double t = (double)(zoom - zoomLevel) / (zoom - minzoom);
-            return LOD_NEAR_DISTANCE * Math.Pow(LOD_FAR_DISTANCE / LOD_NEAR_DISTANCE, t);
+            double t = (double)(maxZ - zoomLevel) / (maxZ - minZ);
+            // Square root bias: high zoom stays near camera, lower zoom kicks in faster
+            t = Math.Sqrt(t);
+            return LOD_NEAR_DISTANCE * Math.Pow(farDist / LOD_NEAR_DISTANCE, t);
         }
 
         private GPoint GetParentTile(GPoint tile, int currentZoom, out int parentZoom)

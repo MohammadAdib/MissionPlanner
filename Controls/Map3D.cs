@@ -259,10 +259,20 @@ namespace MissionPlanner.Controls
 
         double lookX, lookY, lookZ; // camera look-at coordinates
 
-        // image zoom level
-        public int zoom { get; set; } = 17;
-        private const int zoomLevelOffset = 5;
-        private int minzoom => Math.Max(1, zoom - zoomLevelOffset);
+        // image zoom level - automatic LOD based on altitude/distance
+        private const int zoom = 17;
+        private const int zoomLevelOffset = 4;
+        private const int minZoomFloor = 13;
+
+        /// <summary>
+        /// Zoom levels to drop at altitude. 1 level per 500m.
+        /// Capped so effectiveZoom never drops below minZoomFloor.
+        /// </summary>
+        private int AltitudeZoomDrop => Math.Min(zoom - minZoomFloor, (int)Math.Floor(Math.Max(0, _center.Alt) / 500.0));
+
+        private int effectiveZoom => zoom - AltitudeZoomDrop;
+
+        private int minzoom => Math.Max(minZoomFloor, effectiveZoom - zoomLevelOffset);
         private MyButton btn_configure;
         private SemaphoreSlim textureSemaphore = new SemaphoreSlim(1, 1);
         private Timer timer1;
@@ -340,7 +350,6 @@ namespace MissionPlanner.Controls
             instance = this;
 
             // Load settings early, before any rendering
-            zoom = Settings.Instance.GetInt32("map3d_zoom_level", 17);
             _cameraDist = Settings.Instance.GetDouble("map3d_camera_dist", 0.8);
             _cameraHeight = Settings.Instance.GetDouble("map3d_camera_height", 0.2);
             _cameraAngle = Settings.Instance.GetDouble("map3d_camera_angle", 0.0);
@@ -1760,8 +1769,8 @@ namespace MissionPlanner.Controls
                     modelMatrix = Matrix4.Mult(modelMatrix, Matrix4.CreateRotationZ((float)(_planeRoll * MathHelper.deg2rad)));
                 }
 
-                // Update projection matrix based on altitude - 100km render distance when >500m altitude
-                float renderDistance = _center.Alt > 500 ? 100000f : 50000f;
+                // Update projection matrix based on altitude - render distance matches tile loading distance
+                float renderDistance = (float)LodFarDistance;
                 // Two-pass rendering: use larger near plane for terrain (better depth precision at high altitudes)
                 // Plane will be rendered in second pass with 0.1f near plane
                 float terrainNearPlane = _center.Alt > 500 ? 5.0f : (_center.Alt > 100 ? 1.0f : 0.1f);
@@ -1794,9 +1803,10 @@ namespace MissionPlanner.Controls
                 GL.BlendFunc(BlendingFactorSrc.SrcAlpha, BlendingFactorDest.OneMinusSrcAlpha);
                 GL.BlendEquation(BlendEquationMode.FuncAdd);
 
-                // Set fog uniforms for tile shader (fog implemented in shader)
+                // Set fog uniforms for tile shader - fog starts at 80% of tile distance, ends at tile edge
                 Color fogColor = ThemeManager.HudSkyBot.A > 0 ? ThemeManager.HudSkyBot : Color.LightBlue;
-                tileInfo.SetFogParams(50000f, 100000f, fogColor);
+                float tileDist = (float)LodFarDistance;
+                tileInfo.SetFogParams(tileDist * 0.8f, tileDist, fogColor);
 
                 var beforedraw = DateTime.Now;
 
@@ -2425,9 +2435,6 @@ namespace MissionPlanner.Controls
                 };
 
                 // Numeric inputs
-                var numZoom = new NumericUpDown { Minimum = 6, Maximum = 24, Value = Math.Max(6, Math.Min(24, zoom)) };
-                addRow("Map Zoom:", numZoom);
-
                 var numDist = new NumericUpDown { Minimum = (decimal)0.1, Maximum = 100, DecimalPlaces = 2, Increment = (decimal)0.05, Value = (decimal)Math.Max(0.1, Math.Min(100, _cameraDist)) };
                 addRow("Camera Dist:", numDist);
 
@@ -2529,7 +2536,6 @@ namespace MissionPlanner.Controls
                 var btnReset = new MyButton { Text = "Reset", Width = 75, Margin = new Padding(10, 0, 0, 0) };
                 btnReset.Click += (s, ev) =>
                 {
-                    numZoom.Value = 17;
                     numDist.Value = (decimal)0.8;
                     numHeight.Value = (decimal)0.2;
                     numFOV.Value = 60;
@@ -2563,7 +2569,6 @@ namespace MissionPlanner.Controls
 
                 dialog.FormClosing += (s, ev) =>
                 {
-                    zoom = (int)numZoom.Value;
                     _cameraDist = (double)numDist.Value;
                     _cameraHeight = (double)numHeight.Value;
                     _planeScaleMultiplier = (float)numScale.Value;
@@ -2595,7 +2600,6 @@ namespace MissionPlanner.Controls
 
                     _stlLoader.CustomSTLPath = selectedSTLPath;
 
-                    Settings.Instance["map3d_zoom_level"] = zoom.ToString();
                     Settings.Instance["map3d_camera_dist"] = _cameraDist.ToString();
                     Settings.Instance["map3d_camera_height"] = _cameraHeight.ToString();
                     Settings.Instance["map3d_mav_scale"] = _planeScaleMultiplier.ToString();
