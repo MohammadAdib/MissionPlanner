@@ -62,7 +62,9 @@ namespace MissionPlanner.Controls
 
                 var item = paramlist[paramname];
 
-                this.SelectedValue = (int)paramlist[paramname].Value;
+                // Round rather than truncate: REAL32 param round-trips can yield e.g. 28.9999996 for 29,
+                // and (int) would floor that to 28, selecting the wrong option (e.g. Gripper instead of LandingGear).
+                this.SelectedValue = (int)Math.Round(paramlist[paramname].Value);
             }
             else
             {
@@ -96,7 +98,9 @@ namespace MissionPlanner.Controls
 
                 var item = paramlist[paramname];
 
-                this.SelectedValue = (int)paramlist[paramname].Value;
+                // Round rather than truncate: REAL32 param round-trips can yield e.g. 28.9999996 for 29,
+                // and (int) would floor that to 28, selecting the wrong option (e.g. Gripper instead of LandingGear).
+                this.SelectedValue = (int)Math.Round(paramlist[paramname].Value);
             }
 
             base.SelectedIndexChanged += new EventHandler(MavlinkComboBox_SelectedIndexChanged);
@@ -124,7 +128,7 @@ namespace MissionPlanner.Controls
 
                 enableControl(true);
 
-                this.Text = Enum.GetName(source, (Int32)paramlist[paramname].Value);
+                this.Text = Enum.GetName(source, (Int32)Math.Round(paramlist[paramname].Value));
             }
 
             base.SelectedIndexChanged += new EventHandler(MavlinkComboBox_SelectedIndexChanged);
