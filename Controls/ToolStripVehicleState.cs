@@ -36,11 +36,13 @@ namespace MissionPlanner.Controls
         private float _lastGpsStatus2 = -1;
         private List<string> _pinnedModes = new List<string>();
         private List<string> _favoriteModes = new List<string>();
+        private List<string> _fltModes = new List<string>();
         private Timer _updateTimer;
+        private const string PinnedSettingsKey = "ModeSelectorPinned";
         private const string FavoritesSettingsKey = "ModeSelectorFavorites";
-        private int _fltModeRefreshCounter = 0;
         private int _visiblePinnedCount = 0;
         private MenuStrip _parentMenuStrip = null;
+        private MAVLinkInterface _subscribedComPort = null;
 
         /// <summary>
         /// Gets the current mode text displayed.
@@ -88,6 +90,7 @@ namespace MissionPlanner.Controls
 
                 LoadSettings();
                 StartUpdateTimer();
+                SubscribeToParamEvents();
             }
             else
             {
@@ -291,6 +294,7 @@ namespace MissionPlanner.Controls
             };
             _modeDropdown.ModeSelected += ModeDropdown_ModeSelected;
             _modeDropdown.FavoriteToggled += ModeDropdown_FavoriteToggled;
+            _modeDropdown.PinToggled += ModeDropdown_PinToggled;
 
             // Pinned modes panel (shows in toolbar)
             _pinnedPanel = new TableLayoutPanel
@@ -518,9 +522,34 @@ namespace MissionPlanner.Controls
             _modeDropdown.SetFavorites(_favoriteModes);
         }
 
+        private void ModeDropdown_PinToggled(object sender, string mode)
+        {
+            if (_pinnedModes.Contains(mode))
+            {
+                _pinnedModes.Remove(mode);
+            }
+            else
+            {
+                _pinnedModes.Add(mode);
+            }
+            SaveSettings();
+            // Reset visible count to show all, then recalculate
+            _visiblePinnedCount = _pinnedModes.Count;
+            UpdatePinnedButtons();
+            AdjustWidthToAvailableSpace();
+            _modeDropdown.SetPinned(_pinnedModes);
+        }
+
         private void LoadSettings()
         {
+            _pinnedModes.Clear();
             _favoriteModes.Clear();
+
+            var savedPinned = Settings.Instance.GetString(PinnedSettingsKey, "");
+            if (!string.IsNullOrEmpty(savedPinned))
+            {
+                _pinnedModes = savedPinned.Split(',').Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+            }
 
             var savedFavorites = Settings.Instance.GetString(FavoritesSettingsKey, "");
             if (!string.IsNullOrEmpty(savedFavorites))
@@ -529,10 +558,13 @@ namespace MissionPlanner.Controls
             }
 
             _modeDropdown.SetFavorites(_favoriteModes);
+            _modeDropdown.SetPinned(_pinnedModes);
+            UpdatePinnedButtons();
         }
 
         private void SaveSettings()
         {
+            Settings.Instance[PinnedSettingsKey] = string.Join(",", _pinnedModes);
             Settings.Instance[FavoritesSettingsKey] = string.Join(",", _favoriteModes);
         }
 
@@ -730,23 +762,71 @@ namespace MissionPlanner.Controls
         }
 
         /// <summary>
-        /// Refreshes pinned modes from vehicle FLTMODE params.
-        /// Only updates UI if the mode list has changed.
+        /// Refreshes the vehicle's configured FLTMODE1-6 (MODE1-6) list. These are shown
+        /// at the top of the mode dropdown in configured order. Only updates if changed.
         /// </summary>
         private void RefreshVehicleFltModes()
         {
             var vehicleModes = GetVehicleFltModes();
-            if (vehicleModes.Count == 0 && _pinnedModes.Count == 0)
-                return;
 
             // Check if list changed
-            if (vehicleModes.SequenceEqual(_pinnedModes))
+            if (vehicleModes.SequenceEqual(_fltModes))
                 return;
 
-            _pinnedModes = vehicleModes;
-            _visiblePinnedCount = _pinnedModes.Count;
-            UpdatePinnedButtons();
-            AdjustWidthToAvailableSpace();
+            _fltModes = vehicleModes;
+            _modeDropdown.SetFltModes(_fltModes);
+        }
+
+        /// <summary>
+        /// Subscribes to parameter events so the FLTMODE list refreshes only when it can
+        /// actually change - on connect/param download and on flight-mode param writes -
+        /// instead of polling. A normal disconnect/reconnect reuses the same comPort
+        /// instance, so a one-time ParamListChanged subscription covers reconnects.
+        /// </summary>
+        private void SubscribeToParamEvents()
+        {
+            MAVLinkInterface.ParamWritten += OnParamWritten;
+
+            _subscribedComPort = MainV2.comPort;
+            if (_subscribedComPort != null)
+                _subscribedComPort.ParamListChanged += OnParamListChanged;
+        }
+
+        // Fired (off the UI thread) when a single parameter write is confirmed.
+        private void OnParamWritten(string paramName)
+        {
+            if (string.IsNullOrEmpty(paramName))
+                return;
+
+            // Only react to flight-mode params (FLTMODE1-6 / MODE1-6)
+            if (!paramName.StartsWith("FLTMODE", StringComparison.OrdinalIgnoreCase) &&
+                !paramName.StartsWith("MODE", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            RefreshFltModesOnUiThread();
+        }
+
+        // Fired (off the UI thread) when the full parameter list is (re)loaded, e.g. on connect.
+        private void OnParamListChanged(object sender, EventArgs e)
+        {
+            RefreshFltModesOnUiThread();
+        }
+
+        private void RefreshFltModesOnUiThread()
+        {
+            try
+            {
+                if (_container == null || _container.IsDisposed || !_container.IsHandleCreated)
+                    return;
+
+                if (_container.InvokeRequired)
+                    _container.BeginInvoke((Action)(() => RefreshVehicleFltModes()));
+                else
+                    RefreshVehicleFltModes();
+            }
+            catch
+            {
+            }
         }
 
         private void SetMode(string mode)
@@ -844,17 +924,6 @@ namespace MissionPlanner.Controls
                         }
                     }
 
-                    // Periodically refresh FLTMODE pins (~every 5 seconds at 200ms interval)
-                    _fltModeRefreshCounter++;
-                    if (_fltModeRefreshCounter >= 25)
-                    {
-                        _fltModeRefreshCounter = 0;
-                        if (_container.InvokeRequired)
-                            _container.BeginInvoke((Action)(() => RefreshVehicleFltModes()));
-                        else
-                            RefreshVehicleFltModes();
-                    }
-
                     // Update GPS status
                     if (cs != null)
                     {
@@ -937,7 +1006,11 @@ namespace MissionPlanner.Controls
                 _lastArmedState = isArmed;
                 UpdateArmButtonAppearance(isArmed);
 
-                // Load flight modes from vehicle params (FLTMODE1-6 / MODE1-6)
+                // Show the user's pinned modes on the toolbar
+                _visiblePinnedCount = _pinnedModes.Count;
+                UpdatePinnedButtons();
+
+                // Load the vehicle's configured modes (FLTMODE1-6 / MODE1-6) for dropdown ordering
                 RefreshVehicleFltModes();
                 AdjustWidthToAvailableSpace();
             }
@@ -957,9 +1030,9 @@ namespace MissionPlanner.Controls
                 _gpsSatsLabel.Text = "Sats: --: ---";
                 _gpsDopLabel.Text = "H: -- | V: --";
                 try { _gpsSatsLabel.ForeColor = ThemeManager.TextColor; } catch { _gpsSatsLabel.ForeColor = Color.White; }
-                // Clear pinned modes and close popup when disconnecting
-                _pinnedModes.Clear();
-                UpdatePinnedButtons();
+                // Clear the vehicle FLTMODE list (pinned modes are user settings and persist)
+                _fltModes.Clear();
+                _modeDropdown.SetFltModes(_fltModes);
                 _modeDropdown.ClosePopup();
             }
         }
@@ -1064,6 +1137,14 @@ namespace MissionPlanner.Controls
                     _parentMenuStrip.Resize -= ParentMenuStrip_Resize;
                     _parentMenuStrip = null;
                 }
+
+                // Unsubscribe from param events
+                MAVLinkInterface.ParamWritten -= OnParamWritten;
+                if (_subscribedComPort != null)
+                {
+                    _subscribedComPort.ParamListChanged -= OnParamListChanged;
+                    _subscribedComPort = null;
+                }
             }
             base.Dispose(disposing);
         }
@@ -1078,6 +1159,8 @@ namespace MissionPlanner.Controls
         private bool _isDropdownOpen = false;
         private ModeDropdownPopup _popup;
         private List<string> _favorites = new List<string>();
+        private List<string> _pinned = new List<string>();
+        private List<string> _fltModes = new List<string>();
         private string _currentMode = "---";
 
         public string CurrentMode
@@ -1095,6 +1178,7 @@ namespace MissionPlanner.Controls
 
         public event EventHandler<string> ModeSelected;
         public event EventHandler<string> FavoriteToggled;
+        public event EventHandler<string> PinToggled;
 
         public ModeDropdownButton()
         {
@@ -1119,6 +1203,21 @@ namespace MissionPlanner.Controls
         public void SetFavorites(List<string> favorites)
         {
             _favorites = favorites.ToList();
+        }
+
+        public void SetPinned(List<string> pinned)
+        {
+            _pinned = pinned.ToList();
+        }
+
+        public void SetFltModes(List<string> fltModes)
+        {
+            _fltModes = fltModes?.ToList() ?? new List<string>();
+            // Push to the popup if it's currently open so ordering updates live
+            if (_isDropdownOpen && _popup != null && !_popup.IsDisposed)
+            {
+                _popup.SetFltModes(_fltModes);
+            }
         }
 
         public void RefreshPopupIfOpen()
@@ -1175,6 +1274,8 @@ namespace MissionPlanner.Controls
 
             _popup = new ModeDropdownPopup();
             _popup.SetFavorites(_favorites);
+            _popup.SetPinned(_pinned);
+            _popup.SetFltModes(_fltModes);
             _popup.CurrentMode = CurrentMode;
             _popup.ModeSelected += (s, mode) => {
                 ModeSelected?.Invoke(this, mode);
@@ -1183,6 +1284,10 @@ namespace MissionPlanner.Controls
             _popup.FavoriteToggled += (s, mode) => {
                 FavoriteToggled?.Invoke(this, mode);
                 _popup.SetFavorites(_favorites);
+            };
+            _popup.PinToggled += (s, mode) => {
+                PinToggled?.Invoke(this, mode);
+                _popup.SetPinned(_pinned);
             };
             _popup.FormClosed += (s, args) => {
                 _isDropdownOpen = false;
@@ -1269,23 +1374,31 @@ namespace MissionPlanner.Controls
         private Color _currentBgColor;
         private Color _goldColor;
         private Color _grayColor;
+        private Color _greenColor;
 
         private Panel _scrollPanel;
         private FlowLayoutPanel _modesPanel;
         private List<string> _favorites = new List<string>();
+        private List<string> _pinned = new List<string>();
+        private List<string> _fltModes = new List<string>();
         private List<KeyValuePair<int, string>> _modes = new List<KeyValuePair<int, string>>();
+
+        // Row/title width, sized to fit inside the popup without a horizontal scrollbar
+        // (form width minus padding and the vertical scrollbar).
+        private const int RowWidth = 268;
 
         public string CurrentMode { get; set; } = "";
 
         public event EventHandler<string> ModeSelected;
         public event EventHandler<string> FavoriteToggled;
+        public event EventHandler<string> PinToggled;
 
         public ModeDropdownPopup()
         {
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
-            Size = new Size(240, 300);
+            Size = new Size(300, 320);
 
             // Initialize colors from theme
             try
@@ -1294,6 +1407,7 @@ namespace MissionPlanner.Controls
                 _bgColor = ThemeManager.BGColor;
                 _hoverColor = ThemeManager.ControlBGColor;
                 _currentBgColor = ThemeManager.ButBG;
+                _greenColor = ThemeManager.ButBG;
                 _goldColor = Color.FromArgb(255, 215, 0); // Gold not in theme
                 _grayColor = Color.FromArgb(128, 128, 128);
                 BackColor = _bgColor;
@@ -1304,6 +1418,7 @@ namespace MissionPlanner.Controls
                 _bgColor = Color.FromArgb(0x26, 0x27, 0x28);
                 _hoverColor = Color.FromArgb(0x43, 0x44, 0x45);
                 _currentBgColor = Color.FromArgb(148, 193, 31);
+                _greenColor = Color.FromArgb(148, 193, 31);
                 _goldColor = Color.FromArgb(255, 215, 0);
                 _grayColor = Color.FromArgb(128, 128, 128);
                 BackColor = _bgColor;
@@ -1323,7 +1438,7 @@ namespace MissionPlanner.Controls
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 FlowDirection = FlowDirection.TopDown,
                 WrapContents = false,
-                Width = 220
+                Width = RowWidth
             };
 
             _scrollPanel.Controls.Add(_modesPanel);
@@ -1335,6 +1450,18 @@ namespace MissionPlanner.Controls
         public void SetFavorites(List<string> favorites)
         {
             _favorites = favorites?.ToList() ?? new List<string>();
+            RefreshModesList();
+        }
+
+        public void SetPinned(List<string> pinned)
+        {
+            _pinned = pinned?.ToList() ?? new List<string>();
+            RefreshModesList();
+        }
+
+        public void SetFltModes(List<string> fltModes)
+        {
+            _fltModes = fltModes?.ToList() ?? new List<string>();
             RefreshModesList();
         }
 
@@ -1363,53 +1490,175 @@ namespace MissionPlanner.Controls
             _modesPanel.SuspendLayout();
             _modesPanel.Controls.Clear();
 
-            // Sort modes: favorites first (alphabetically), then the rest (alphabetically)
-            var sortedModes = _modes
+            // The vehicle's configured FLTMODE1-6 modes are always shown first, in configured order.
+            var fltOrder = new Dictionary<string, int>();
+            for (int i = 0; i < _fltModes.Count; i++)
+            {
+                if (!fltOrder.ContainsKey(_fltModes[i]))
+                    fltOrder[_fltModes[i]] = i;
+            }
+
+            // Configured modes: the vehicle FLTMODEs, in configured order.
+            var configuredModes = _modes
+                .Where(m => fltOrder.ContainsKey(m.Value))
+                .OrderBy(m => fltOrder[m.Value])
+                .ToList();
+
+            // Remaining modes: favorites first (alphabetically), then the rest (alphabetically).
+            var otherModes = _modes
+                .Where(m => !fltOrder.ContainsKey(m.Value))
                 .OrderByDescending(m => _favorites.Contains(m.Value))
                 .ThenBy(m => m.Value)
                 .ToList();
 
-            foreach (var mode in sortedModes)
+            // "Configured modes" section - always at the top, so no favorite star here.
+            if (configuredModes.Count > 0)
             {
-                string displayName = mode.Value;
+                _modesPanel.Controls.Add(CreateSectionTitle("Configured modes"));
+                foreach (var mode in configuredModes)
+                    _modesPanel.Controls.Add(CreateModeRow(mode, showStar: false));
+            }
 
-                var row = new Panel
+            // Divider between the two sections (only when both are present).
+            // Inset via width (not horizontal margin) so it doesn't widen the panel.
+            if (configuredModes.Count > 0 && otherModes.Count > 0)
+            {
+                _modesPanel.Controls.Add(new Panel
                 {
-                    Width = 220,
-                    Height = 28,
-                    Margin = new Padding(0, 1, 0, 1),
-                    Cursor = Cursors.Hand
-                };
+                    Width = RowWidth - 12,
+                    Height = 1,
+                    Margin = new Padding(6, 4, 6, 4),
+                    BackColor = Color.FromArgb(80, 80, 80)
+                });
+            }
 
-                bool isCurrent = mode.Value.Equals(CurrentMode, StringComparison.OrdinalIgnoreCase);
-                bool isFavorite = _favorites.Contains(mode.Value);
+            // "Flight modes" section - the full selectable list, with favorite stars.
+            if (otherModes.Count > 0)
+            {
+                _modesPanel.Controls.Add(CreateSectionTitle("Flight modes"));
+                foreach (var mode in otherModes)
+                    _modesPanel.Controls.Add(CreateModeRow(mode, showStar: true));
+            }
 
-                row.BackColor = isCurrent ? _currentBgColor : _bgColor;
+            _modesPanel.ResumeLayout(true);
+        }
 
-                // Mode name label
-                var modeLabel = new Label
-                {
-                    Text = displayName,
-                    AutoSize = false,
-                    Width = 180,
-                    Height = 28,
-                    TextAlign = ContentAlignment.MiddleLeft,
-                    ForeColor = _textColor,
-                    BackColor = Color.Transparent,
-                    Font = isCurrent ? new Font("Segoe UI", 9F, FontStyle.Bold) : new Font("Segoe UI", 9F),
-                    Padding = new Padding(8, 0, 0, 0),
-                    Cursor = Cursors.Hand,
-                    Tag = mode.Value
-                };
+        private Label CreateSectionTitle(string text)
+        {
+            return new Label
+            {
+                Text = text,
+                AutoSize = false,
+                Width = RowWidth,
+                Height = 20,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = _grayColor,
+                BackColor = Color.Transparent,
+                Font = new Font("Segoe UI", 8F, FontStyle.Bold),
+                Padding = new Padding(8, 0, 0, 0),
+                Margin = new Padding(0, 2, 0, 0)
+            };
+        }
 
-                // Star button (favorite)
+        private Panel CreateModeRow(KeyValuePair<int, string> mode, bool showStar)
+        {
+            var row = new Panel
+            {
+                Width = RowWidth,
+                Height = 28,
+                Margin = new Padding(0, 1, 0, 1),
+                Cursor = Cursors.Hand
+            };
+
+            bool isCurrent = mode.Value.Equals(CurrentMode, StringComparison.OrdinalIgnoreCase);
+            bool isFavorite = _favorites.Contains(mode.Value);
+            bool isPinned = _pinned.Contains(mode.Value);
+
+            row.BackColor = isCurrent ? _currentBgColor : _bgColor;
+
+            // Mode name label
+            var modeLabel = new Label
+            {
+                Text = mode.Value,
+                AutoSize = false,
+                Left = 0,
+                Width = 200,
+                Height = 28,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = _textColor,
+                BackColor = Color.Transparent,
+                Font = isCurrent ? new Font("Segoe UI", 9F, FontStyle.Bold) : new Font("Segoe UI", 9F),
+                Padding = new Padding(8, 0, 0, 0),
+                Cursor = Cursors.Hand,
+                Tag = mode.Value // Keep original for mode setting
+            };
+
+            // Pin button - diamond indicator (pins the mode to the toolbar)
+            var pinLabel = new Label
+            {
+                Text = isPinned ? "◆" : "◇",
+                AutoSize = false,
+                Left = 208,
+                Width = 28,
+                Height = 28,
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = isPinned ? _greenColor : _grayColor,
+                BackColor = Color.Transparent,
+                Font = new Font("Segoe UI", 11F),
+                Cursor = Cursors.Hand,
+                Tag = mode.Value
+            };
+
+            // Capture values for closures
+            bool isCurrentCaptured = isCurrent;
+            bool isPinnedCaptured = isPinned;
+
+            var hoverColor = _hoverColor;
+            var bgColor = _bgColor;
+            var greenColor = _greenColor;
+            var grayColor = _grayColor;
+            var goldColor = _goldColor;
+
+            // Hover effects for row
+            Action<bool> setHover = (hover) => {
+                if (!isCurrentCaptured)
+                    row.BackColor = hover ? hoverColor : bgColor;
+            };
+
+            row.MouseEnter += (s, e) => setHover(true);
+            row.MouseLeave += (s, e) => setHover(false);
+            modeLabel.MouseEnter += (s, e) => setHover(true);
+            modeLabel.MouseLeave += (s, e) => setHover(false);
+            pinLabel.MouseEnter += (s, e) => {
+                setHover(true);
+                pinLabel.ForeColor = greenColor;
+            };
+            pinLabel.MouseLeave += (s, e) => {
+                setHover(false);
+                pinLabel.ForeColor = isPinnedCaptured ? greenColor : grayColor;
+            };
+
+            // Click handlers
+            row.Click += (s, e) => ModeSelected?.Invoke(this, mode.Value);
+            modeLabel.Click += (s, e) => ModeSelected?.Invoke(this, mode.Value);
+            pinLabel.Click += (s, e) => {
+                PinToggled?.Invoke(this, mode.Value);
+            };
+
+            row.Controls.Add(modeLabel);
+            row.Controls.Add(pinLabel);
+
+            // Star button (favorite) - only in the "Flight modes" section
+            if (showStar)
+            {
+                bool isFavoriteCaptured = isFavorite;
                 var starLabel = new Label
                 {
                     Text = isFavorite ? "★" : "☆",
                     AutoSize = false,
+                    Left = 236,
                     Width = 28,
                     Height = 28,
-                    Left = 184,
                     TextAlign = ContentAlignment.MiddleCenter,
                     ForeColor = isFavorite ? _goldColor : _grayColor,
                     BackColor = Color.Transparent,
@@ -1417,26 +1666,6 @@ namespace MissionPlanner.Controls
                     Cursor = Cursors.Hand,
                     Tag = mode.Value
                 };
-
-                // Capture values for closures
-                bool isCurrentCaptured = isCurrent;
-                bool isFavoriteCaptured = isFavorite;
-
-                var hoverColor = _hoverColor;
-                var bgColor = _bgColor;
-                var grayColor = _grayColor;
-                var goldColor = _goldColor;
-
-                // Hover effects for row
-                Action<bool> setHover = (hover) => {
-                    if (!isCurrentCaptured)
-                        row.BackColor = hover ? hoverColor : bgColor;
-                };
-
-                row.MouseEnter += (s, e) => setHover(true);
-                row.MouseLeave += (s, e) => setHover(false);
-                modeLabel.MouseEnter += (s, e) => setHover(true);
-                modeLabel.MouseLeave += (s, e) => setHover(false);
                 starLabel.MouseEnter += (s, e) => {
                     setHover(true);
                     starLabel.ForeColor = goldColor;
@@ -1445,20 +1674,13 @@ namespace MissionPlanner.Controls
                     setHover(false);
                     starLabel.ForeColor = isFavoriteCaptured ? goldColor : grayColor;
                 };
-
-                // Click handlers
-                row.Click += (s, e) => ModeSelected?.Invoke(this, mode.Value);
-                modeLabel.Click += (s, e) => ModeSelected?.Invoke(this, mode.Value);
                 starLabel.Click += (s, e) => {
                     FavoriteToggled?.Invoke(this, mode.Value);
                 };
-
-                row.Controls.Add(modeLabel);
                 row.Controls.Add(starLabel);
-                _modesPanel.Controls.Add(row);
             }
 
-            _modesPanel.ResumeLayout(true);
+            return row;
         }
 
         protected override void OnPaint(PaintEventArgs e)
